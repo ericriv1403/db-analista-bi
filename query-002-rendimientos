@@ -1,0 +1,205 @@
+let
+    OrigenHoras =
+        Sql.Database(
+            "10.0.2.27\DataWareHousse,8699",
+            "GestionHumana",
+            [
+                Query = "
+                    /* ===========================
+                    %R por persona (SQL Server)
+                    Salida: codigo_personal, %R
+                    Lógica:
+                        - Mantiene solo operativos (no ADM) y cargos permitidos
+                        - Calcula rendimiento_registro = horas_trabajadas / horas_presenciales
+                        - Elimina atípicos de rendimiento_registro (±3.5 desv. estándar)
+                        - Calcula %HN por persona
+                        - Calcula media y STDEVP(%HN) globales
+                        - Umbral = media + 2*desv
+                        - %R = HT_Rend / HP_Rend si %HN <= umbral y HP_Rend > 0; si no, NULL
+                    ===========================*/
+                    SET NOCOUNT ON;
+
+                    DECLARE @Hoy date   = CAST(GETDATE() AS date);
+                    DECLARE @Min date   = DATEADD(YEAR, -5, @Hoy);
+                    DECLARE @K   float  = 2.0;   -- N° de veces que se desviara de la media
+
+                    WITH
+                    /* 1) Normalización Actividad */
+                    ActUnidad AS (
+                        SELECT Codigo, Unidad,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY Codigo
+                                ORDER BY CASE WHEN Finca IN ('ACTIVO','Activo') THEN 0 ELSE 1 END, Codigo DESC
+                            ) AS rn
+                        FROM dbo.Actividad
+                        WHERE Finca IN ('ACTIVO','Activo')
+                        AND Unidad <> '-'
+                    ),
+                    UnidadPorCodigo AS (
+                        SELECT Codigo, Unidad
+                        FROM ActUnidad
+                        WHERE rn = 1
+                    ),
+
+                    /* 2) Base de horas (últimos 5 años) + unidad de actividad */
+                    BaseHoras AS (
+                        SELECT
+                            mh.fecha,
+                            mh.bloque,
+                            mh.codigo_personal,
+                            mh.codigo_actividad,
+                            mh.actividad,
+                            mh.hora_ingreso,
+                            mh.hora_salida,
+                            UPPER(mh.area_trabajada) AS area_trabajada,
+                            UPPER(mh.area_original)  AS area_original,
+                            mh.unidades_producidas,
+                            mh.unidad_medida,
+                            mh.horas_trabajadas,
+                            mh.horas_presenciales,
+                            uc.Unidad AS [Actividad.1.Unidad]
+                        FROM dbo.GHU_View_Maestro_Horas AS mh
+                        LEFT JOIN UnidadPorCodigo AS uc
+                            ON uc.Codigo = mh.codigo_actividad
+                        WHERE mh.fecha > @Min
+                        AND mh.fecha <= @Hoy
+                    ),
+
+                    /* 3) Empleados (clasificación y cargo) */
+                    Emp AS (
+                        SELECT Codigo_Personal,
+                            Clasificacion_Personal,
+                            Cargo
+                        FROM dbo.GHU_View_Maestro_Empleados
+                    ),
+
+                    /* 4) Join + filtros de negocio:
+                        - Excluir ADM
+                        - Cargos operativos permitidos
+                        - horas_presenciales no nulas ni cero
+                        - Cálculo de rendimiento_registro = horas_trabajadas / horas_presenciales
+                    */
+                    Filtrado AS (
+                        SELECT 
+                            b.*,
+                            CASE 
+                                WHEN b.horas_presenciales IS NULL OR b.horas_presenciales = 0 
+                                    THEN NULL
+                                ELSE CAST(b.horas_trabajadas AS float) / CAST(b.horas_presenciales AS float)
+                            END AS rendimiento_registro
+                        FROM BaseHoras b
+                        INNER JOIN Emp e
+                                ON e.Codigo_Personal = b.codigo_personal
+                        WHERE e.Clasificacion_Personal <> 'ADM'
+                        AND e.Cargo IN (
+                                N'OPERADOR DE DRON',
+                                N'SUPERVISOR',
+                                N'SUPERVISORA',
+                                N'TRABAJADOR FLORÍCOLA O DEL AGRO',
+                                N'TRABAJADOR OPERATIVO FLORICOLA O DEL AGRO',   -- sin acento
+                                N'TRABAJADOR OPERATIVO FLORÍCOLA O DEL AGRO'    -- con acento
+                        )
+                        AND b.horas_presenciales IS NOT NULL
+                        AND b.horas_presenciales <> 0
+                    ),
+
+                    /* 4.1) Estadísticos globales de rendimiento_registro (para detectar atípicos) */
+                    StatsRend AS (
+                        SELECT
+                            AVG(CAST(rendimiento_registro AS float))    AS media_rend,
+                            STDEVP(CAST(rendimiento_registro AS float)) AS desv_rend
+                        FROM Filtrado
+                        WHERE rendimiento_registro IS NOT NULL
+                    ),
+
+                    /* 4.2) Eliminar atípicos: rendimiento_registro fuera de ±3.5 desviaciones */
+                    SinAtipicos AS (
+                        SELECT f.*
+                        FROM Filtrado f
+                        CROSS JOIN StatsRend sr
+                        WHERE 
+                            f.rendimiento_registro IS NULL
+                            OR (
+                                sr.desv_rend IS NOT NULL 
+                                AND sr.desv_rend > 0
+                                AND f.rendimiento_registro >= sr.media_rend - (3.5 * sr.desv_rend)
+                                AND f.rendimiento_registro <= sr.media_rend + (3.5 * sr.desv_rend)
+                            )
+                    ),
+
+                    /* 5) Columnas por fila para rendimiento:
+                        - Solo cuentan cuando unidad_medida <> 'H. Normales'
+                        - Ya sin atípicos
+                    */
+                    ConRend AS (
+                        SELECT
+                            f.*,
+                            CASE WHEN f.unidad_medida <> N'H. Normales' THEN f.horas_presenciales ELSE 0 END AS horas_presenciales_rend,
+                            CASE WHEN f.unidad_medida <> N'H. Normales' THEN f.horas_trabajadas    ELSE 0 END AS horas_trabajadas_rend
+                        FROM SinAtipicos f
+                    ),
+
+                    /* 6) Agregado por persona */
+                    SumaPersona AS (
+                        SELECT
+                            codigo_personal,
+                            SUM(COALESCE(horas_presenciales,      0)) AS hp_total,
+                            SUM(COALESCE(horas_presenciales_rend, 0)) AS hp_rend,
+                            SUM(COALESCE(horas_trabajadas,        0)) AS ht_total,
+                            SUM(COALESCE(horas_trabajadas_rend,   0)) AS ht_rend
+                        FROM ConRend
+                        GROUP BY codigo_personal
+                    ),
+
+                    /* 7) %HN por persona: %HN = 1 - hp_rend / hp_total (protegiendo división) */
+                    PctHN AS (
+                        SELECT
+                            s.codigo_personal,
+                            s.hp_total, s.hp_rend, s.ht_rend,
+                            CASE
+                                WHEN s.hp_total > 0 THEN 1.0 - (CAST(s.hp_rend AS float) / NULLIF(CAST(s.hp_total AS float), 0))
+                                ELSE NULL
+                            END AS pct_hn
+                        FROM SumaPersona s
+                    ),
+
+                    /* 8) Estadísticos globales de %HN (ignorando NULL):
+                        media = AVG(%HN)
+                        desv  = STDEVP(%HN) 
+                    */
+                    Stats AS (
+                        SELECT
+                            AVG(CAST(pct_hn AS float))    AS media_pct_hn,
+                            STDEVP(CAST(pct_hn AS float)) AS desv_pct_hn
+                        FROM PctHN
+                        WHERE pct_hn IS NOT NULL
+                    )
+
+                    /* 9) Resultado final:
+                        - Umbral = media + @K * desv
+                        - %R = ht_rend / hp_rend si:
+                                * pct_hn <= umbral
+                                * hp_rend > 0
+                            Si no, %R = NULL
+                    */
+                    SELECT
+                        p.codigo_personal,
+                        CAST(
+                            CASE
+                                WHEN p.pct_hn IS NULL THEN NULL
+                                WHEN s.media_pct_hn IS NULL OR s.desv_pct_hn IS NULL THEN NULL
+                                WHEN p.pct_hn > (s.media_pct_hn + @K * s.desv_pct_hn) THEN NULL
+                                WHEN NULLIF(p.hp_rend, 0) IS NULL THEN NULL
+                                ELSE CAST(p.ht_rend AS float) / CAST(p.hp_rend AS float)
+                            END
+                        AS decimal(18,6)) AS [%R]
+                    FROM PctHN p
+                    CROSS JOIN Stats s
+                    ORDER BY p.codigo_personal;
+                    "
+            ]
+        ),
+    #"Filas ordenadas" = Table.Sort(OrigenHoras,{{"codigo_personal", Order.Descending}})
+
+in
+    #"Filas ordenadas"
