@@ -1,0 +1,162 @@
+let
+    Origen =
+        Sql.Database(
+            "10.0.2.27\DataWareHousse,8699",
+            "GestionHumana",
+            [
+                Query = "
+                    SET NOCOUNT ON;
+
+                    DECLARE @FechaInicio date = '2020-09-01';
+                    DECLARE @FechaFin    date = CAST(GETDATE() AS date);
+
+                    /* ======================================
+                       1) BASE ENTRADAS-SALIDAS DESDE HISTORIA_PERSONAL
+                          + MAESTRO + PERSONAL (Finca MH/SJ)
+                       ====================================== */
+                    WITH BaseMov AS (
+                        SELECT
+                            hp.Codigo_Personal,
+                            CAST(hp.Fecha_Inicio_Evento AS date) AS Fecha_Ingreso,
+                            CAST(hp.Fecha_Fin_Evento    AS date) AS Fecha_Salida
+                        FROM dbo.Historia_Personal AS hp
+                        INNER JOIN dbo.GHU_View_Maestro_Empleados AS me
+                            ON hp.Codigo_Personal = me.Codigo_Personal
+                        INNER JOIN dbo.Personal AS p
+                            ON hp.Codigo_Personal = p.Codigo_Personal
+                        WHERE
+                            hp.Tipo_de_Evento = 'IS'                  -- Ingreso/Salida
+                            AND hp.Fecha_Inicio_Evento IS NOT NULL
+                            AND CAST(hp.Fecha_Inicio_Evento AS date) >= @FechaInicio
+                            AND CAST(hp.Fecha_Inicio_Evento AS date) <= @FechaFin
+                            AND me.Codigo_Personal NOT LIKE 'VC%'     -- excluye VC
+                            AND me.Clasificacion_Personal IN ('AGR','OCAS','ADM')  -- AGR, ADM, OCAS
+                            AND p.Finca IN ('MH', 'SJ')                -- solo fincas MH y SJ
+                            AND p.A_Empresa = '2 - STARFLOWERS CIA. LTDA.'
+                    ),
+
+                    /* ======================================
+                       2) CALENDARIO DÍA A DÍA
+                       ====================================== */
+                    Calendario AS (
+                        SELECT @FechaInicio AS Fecha
+                        UNION ALL
+                        SELECT DATEADD(DAY, 1, Fecha)
+                        FROM Calendario
+                        WHERE Fecha < @FechaFin
+                    ),
+
+                    /* ======================================
+                       3) KÁRDEX PERSONA-DÍA (CORREGIDO)
+                          - Entradas/Salidas por día
+                          - Existencias del día (personas activas ese día)
+                          - Antigüedad ese día
+                       ====================================== */
+                    KardexPersonaDia AS (
+                        SELECT
+                            c.Fecha,
+                            b.Codigo_Personal,
+                            b.Fecha_Ingreso,
+                            b.Fecha_Salida,
+
+                            -- Entrada el día exacto de ingreso
+                            CASE 
+                                WHEN c.Fecha = b.Fecha_Ingreso THEN 1 
+                                ELSE 0 
+                            END AS EsEntrada,
+
+                            -- Salida el día exacto de salida
+                            CASE 
+                                WHEN b.Fecha_Salida IS NOT NULL
+                                     AND c.Fecha = b.Fecha_Salida THEN 1
+                                ELSE 0
+                            END AS EsSalida,
+
+                            -- Activo en el día (al cierre del día)
+                            -- Intervalo [Fecha_Ingreso, Fecha_Salida)
+                            CASE 
+                                WHEN c.Fecha >= b.Fecha_Ingreso
+                                     AND (b.Fecha_Salida IS NULL OR c.Fecha < b.Fecha_Salida)
+                                THEN 1 ELSE 0 
+                            END AS Activo_Dia,
+
+                            -- Días de antigüedad en ese día
+                            CASE 
+                                WHEN c.Fecha >= b.Fecha_Ingreso
+                                     AND (b.Fecha_Salida IS NULL OR c.Fecha < b.Fecha_Salida)
+                                THEN DATEDIFF(DAY, b.Fecha_Ingreso, c.Fecha)
+                                ELSE NULL
+                            END AS Dias_Antiguedad
+                        FROM Calendario c
+                        JOIN BaseMov b
+                          ON c.Fecha >= b.Fecha_Ingreso
+                         AND c.Fecha <= ISNULL(b.Fecha_Salida, @FechaFin)
+                    ),
+
+                    /* ======================================
+                       4) RESUMEN DIARIO POR ANTIGÜEDAD
+                          (EXISTENCIAS T = T-1 + ENTRADAS T - SALIDAS T)
+                       ====================================== */
+                    ResumenExistencias AS (
+                        SELECT
+                            Fecha,
+                            SUM(EsEntrada) AS Entradas,
+                            SUM(EsSalida)  AS Salidas,
+
+                            -- Existencias del día (personas activas ese día)
+                            SUM(Activo_Dia) AS Existencias_Total,
+
+                            -- Existencias con > 1 año de antigüedad
+                            SUM(
+                                CASE 
+                                    WHEN Activo_Dia = 1
+                                         AND Dias_Antiguedad > 365 
+                                    THEN 1 ELSE 0 
+                                END
+                            ) AS Existencias_Mas_1_Anio,
+
+                            -- Existencias con <= 1 año de antigüedad
+                            SUM(
+                                CASE 
+                                    WHEN Activo_Dia = 1
+                                         AND Dias_Antiguedad <= 365 
+                                    THEN 1 ELSE 0 
+                                END
+                            ) AS Existencias_Menos_1_Anio
+                        FROM KardexPersonaDia
+                        GROUP BY Fecha
+                    )
+
+                    /* ======================================
+                       5) SALIDA FINAL (CALENDARIO COMPLETO)
+                       ====================================== */
+                    SELECT
+                        c.Fecha,
+                        ISNULL(r.Entradas, 0)                 AS Entradas,
+                        ISNULL(r.Salidas, 0)                  AS Salidas,
+                        ISNULL(r.Existencias_Total, 0)        AS Existencias_Total,
+                        ISNULL(r.Existencias_Mas_1_Anio, 0)   AS Existencias_Mas_1_Anio,
+                        ISNULL(r.Existencias_Menos_1_Anio, 0) AS Existencias_Menos_1_Anio
+                    FROM Calendario c
+                    LEFT JOIN ResumenExistencias r
+                      ON c.Fecha = r.Fecha
+                    ORDER BY c.Fecha
+                    OPTION (MAXRECURSION 32767);
+                "
+            ]
+        ),
+
+    #"Tipo cambiado" =
+        Table.TransformColumnTypes(
+            Origen,
+            {
+                {"Fecha", type date},
+                {"Entradas", Int64.Type},
+                {"Salidas", Int64.Type},
+                {"Existencias_Total", Int64.Type},
+                {"Existencias_Mas_1_Anio", Int64.Type},
+                {"Existencias_Menos_1_Anio", Int64.Type}
+            }
+        )
+in
+    #"Tipo cambiado"
