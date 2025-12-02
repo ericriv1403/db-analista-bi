@@ -1,0 +1,469 @@
+let
+    // =========================
+    // 0. FUNCIONES AUXILIARES (M)
+    // =========================
+    fnNormText = (t as nullable text) as nullable text =>
+        if t = null then 
+            null 
+        else 
+            Text.Upper(
+                Text.Trim(
+                    Text.Clean(t)
+                )
+            ),
+
+    fnContainsAny = (txt as nullable text, patterns as list) as logical =>
+        if txt = null then 
+            false 
+        else
+            List.AnyTrue(
+                List.Transform(
+                    patterns,
+                    each Text.Contains(txt, _)
+                )
+            ),
+
+    // ---- Cargo Actual: corregir tildes / género / puntuación ----
+    fnNormCargo = (t as nullable text) as nullable text =>
+    let
+        v0 = fnNormText(t),
+        v1 = if v0 = null then null else Text.Replace(v0, ".", ""),   // quitar puntos
+        r =
+            if v1 = null or v1 = "" then
+                null
+            // COORDINADOR / COORDINADORA
+            else if List.Contains({"COORDINADOR", "COORDINADORA"}, v1) then
+                "COORDINADOR"
+            // SUPERVISOR / SUPERVISORA
+            else if List.Contains({"SUPERVISOR", "SUPERVISORA"}, v1) then
+                "SUPERVISOR"
+            // JEFE DE AREA
+            else if v1 = "JEFE DE AREA" then
+                "JEFE DE ÁREA"
+            // TRABAJADOR FLORÍCOLA
+            else if v1 = "TRABAJADOR FLORÍCOLA O DEL AGRO" 
+                 or v1 = "TRABAJADOR OPERATIVO FLORICOLA O DEL AGRO"
+                 or v1 = "TRABAJADOR OPERATIVO FLORÍCOLA O DEL AGRO" then
+                "TRABAJADOR OPERATIVO FLORÍCOLA O DEL AGRO"
+            // TRABAJADORA SOCIAL -> neutral
+            else if v1 = "TRABAJADORA SOCIAL" then
+                "TRABAJADOR SOCIAL"
+            // VENDEDORA SENIOR -> neutral
+            else if v1 = "VENDEDORA SENIOR" then
+                "VENDEDOR SENIOR"
+            else
+                v1
+    in
+        r,
+
+    // ---- Parroquia: correcciones básicas y unificación de duplicados evidentes ----
+    fnNormParroquia = (t as nullable text) as nullable text =>
+    let
+        v0 = fnNormText(t),
+        v1 = if v0 = null then null else Text.Replace(v0, "  ", " "), // colapsar dobles espacios
+        r =
+            if v1 = null or v1 = "" then
+                null
+            else if List.Contains({"EL BATAN", "BATAN"}, v1) then
+                "EL BATÁN"
+            else if List.Contains({"EL CABO", "CABO"}, v1) then
+                "EL CABO"
+            else if List.Contains({"AZGOUES", "AZOGUES"}, v1) then
+                "AZOGUES"
+            else if List.Contains({"GUALACEO", "GUALACAEO", "GUALCEO"}, v1) then
+                "GUALACEO"
+            else if List.Contains({"DUG DUG", "DUG- DUG", "DUGDUG"}, v1) then
+                "DUG DUG"
+            else if List.Contains({"HUAYNA CAPAC", "HUAYNA CÁPAC", "HUAYNACAPAC"}, v1) then
+                "HUAYNA CÁPAC"
+            else if v1 = "EL  CEBOLLAR" then
+                "EL CEBOLLAR"
+            else
+                v1
+    in
+        r,
+
+    // =========================
+    //  Instrucción: texto súper limpio + Nivel + Área
+    // =========================
+
+    // --- Normalización fuerte del texto del título ---
+    fnNormTituloTexto = (t as nullable text) as nullable text =>
+    let
+        v0 = fnNormText(t),
+        v1 = if v0 = null then null else Text.Replace(v0, "  ", " "),
+        // correcciones de errores de tipeo/faltas frecuentes
+        v2 = 
+            if v1 = null then null
+            else if v1 = "CIENCAS" then "CIENCIAS"
+            else if v1 = "AGRONOMO" or v1 = "AGRONÓMICA" or v1 = "AGRONOMICA" then "AGRONOMÍA"
+            else if v1 = "IGENIERO AGRONOMO" then "INGENIERO AGRÓNOMO"
+            else if v1 = "INGENIERIO INDUSTRIAL" or v1 = "INGENIERO INDUTRAIL" or v1 = "INGENIERO INDUTRIAL" then "INGENIERO INDUSTRIAL"
+            else if v1 = "ING.EN CIENCIAS DE LA COMPUTACION" then "INGENIERO EN CIENCIAS DE LA COMPUTACION"
+            else if v1 = "TECNICO AGROPECUAR" or v1 = "TECNICO AGROPÈCUARIO" then "TECNICO AGROPECUARIO"
+            else if v1 = "CIENCIAS(GENERALES)" then "CIENCIAS GENERALES"
+            else if v1 = "DE SERVCIOS" or v1 = "DE SERVIC" then "DE SERVICIOS"
+            else if v1 = "AREA TECNICA DE SERVCIOS" then "AREA TECNICA DE SERVICIOS"
+            else 
+                v1,
+        // unificar 'TEC.' 'ING.' etc
+        v3 = if v2 = null then null else
+                Text.Replace(
+                    Text.Replace(
+                        Text.Replace(v2, "TEC.", "TECNICO"),
+                        "ING.", "INGENIERO"
+                    ),
+                    "LCDA.", "LICENCIADA"
+                ),
+        v4 = if v3 = null then null else 
+                Text.Replace(
+                    Text.Replace(v3, "LCDO.", "LICENCIADO"),
+                    "TÉCNICO", "TECNICO"
+                )
+    in
+        v4,
+
+    // --- Nivel de instrucción (para análisis) ---
+    fnNivelTitulo = (t as nullable text) as nullable text =>
+    let
+        v = fnNormTituloTexto(t),
+        r =
+            if v = null or v = "" then
+                null
+            // POSGRADO
+            else if fnContainsAny(v, {"MAGISTER", "MÁGISTER", "MAESTRIA", "MAESTRÍA", "MASTER"}) then
+                "POSGRADO"
+            else if fnContainsAny(v, {"DOCTOR", "PHD", "PH.D"}) then
+                "POSGRADO"
+            // TECNÓLOGO
+            else if fnContainsAny(v, {"TECNOLOGO", "TECNÓLOGO"}) then
+                "TECNÓLOGO"
+            // TÉCNICO
+            else if fnContainsAny(v, {"TECNICO", "TÉCNICO"}) then
+                "TÉCNICO"
+            // BACHILLER
+            else if Text.Contains(v, "BACHILLER") then
+                "BACHILLER"
+            else if Text.Contains(v, "UNIFICADO") or Text.Contains(v, "CIENCIAS GENERALES") then
+                "BACHILLER"
+            // UNIVERSITARIO (pregrado)
+            else if fnContainsAny(v, {"INGENIER", "INGENIERO", "INGENIERA"}) then
+                "UNIVERSITARIO"
+            else if fnContainsAny(v, {"LICENCIAD", "ECONOMIST", "PSICOLOG", "ABOGAD", "ARQUITECT", "MEDIC", "ODONTOLOG"}) then
+                "UNIVERSITARIO"
+            // si dice CIENCIAS pero no tiene tags de técnico/uni/pos, asumimos bachiller
+            else if Text.Contains(v, "CIENCIAS") then
+                "BACHILLER"
+            else
+                "OTRO"
+    in
+        r,
+
+    // --- Área de instrucción (campo: agro, sistemas, admin, etc.) ---
+    fnAreaTitulo = (t as nullable text) as nullable text =>
+    let
+        v = fnNormTituloTexto(t),
+        r =
+            if v = null or v = "" then
+                null
+            else if fnContainsAny(v, {"AGROPECUAR", "AGROPECUARIA", "AGRICOLA", "AGRONOM", "AGROINDUSTRIA", "ZOO", "AGROECOLOGIA"}) then
+                "AGROPECUARIA / AGRONOMÍA"
+            else if fnContainsAny(v, {"CONTABILID", "AUDITORIA", "FINANZ", "COSTOS", "CARTERA"}) then
+                "CONTABILIDAD / FINANZAS"
+            else if fnContainsAny(v, {"ADMINISTRACION", "ADMINISTRACIÓN", "EMPRES", "NEGOCIO", "NEGOCIACION", "MARKETING", "VENTAS", "COMERCIO", "MERCACEO"}) then
+                "ADMINISTRACIÓN / NEGOCIOS"
+            else if fnContainsAny(v, {"SISTEM", "INFORMATICA", "INFORMÁTICA", "COMPUTAC", "SOFTWARE", "TICS", "TELEMATICA"}) then
+                "SISTEMAS / INFORMÁTICA"
+            else if fnContainsAny(v, {"PSICOLOG", "TRABAJO SOCIAL", "TRABAJADORA SOCIAL", "GESTION Y DESARROLLO COMUNITARIO", "SOCIAL"}) then
+                "CIENCIAS SOCIALES / PSICOLOGÍA"
+            else if fnContainsAny(v, {"EDUCACION", "EDUCACIÓN", "PEDAGOGIA", "DOCENCIA"}) then
+                "EDUCACIÓN"
+            else if fnContainsAny(v, {"MEDIC", "ENFERMERIA", "ENFERMERÍA", "FISIOTERAPIA", "SALUD"}) then
+                "SALUD"
+            else if fnContainsAny(v, {"INDUSTRIAL", "MECANICA", "MECÁNICA", "ELECTRIC", "ELECTROMECANICA", "ELECTROMECÁNICA", "ELECTRONICA", "ELECTRÓNICA", "CIVIL", "ARQUITECT"}) then
+                "INGENIERÍAS / INDUSTRIAL"
+            else if fnContainsAny(v, {"TURISMO", "HOTELERIA", "HOTELERÍA"}) then
+                "TURISMO / SERVICIOS"
+            else
+                "OTRAS ÁREAS"
+    in
+        r,
+
+    // =========================
+    // Nacionalidad y Estado Civil
+    // =========================
+    fnNormNacionalidad = (t as nullable text) as nullable text =>
+    let
+        v = fnNormText(t),
+        r =
+            if v = null or v = "" then
+                null
+            else if List.Contains({"ECUATORIANA", "ECUATORIANO", "ECUADOR"}, v) then
+                "ECUATORIANA"
+            else if List.Contains({"PERUANA", "PERUANO"}, v) then
+                "PERUANA"
+            else if v = "VENEZOLANA" then
+                "VENEZOLANA"
+            // cualquier cosa rara (ej. fecha) la mandamos a null
+            else
+                null
+    in
+        r,
+
+    fnNormEstadoCivil = (t as nullable text) as nullable text =>
+    let
+        v = fnNormText(t),
+        r =
+            if v = null or v = "" then
+                null
+            else if Text.StartsWith(v, "CASAD") then
+                "CASADO"
+            else if Text.StartsWith(v, "SOLTER") then
+                "SOLTERO"
+            else if Text.StartsWith(v, "VIUD") then
+                "VIUDO"
+            else if Text.StartsWith(v, "DIVORCIAD") then
+                "DIVORCIADO"
+            else if Text.StartsWith(v, "UNIÓN DE HECHO") or Text.StartsWith(v, "UNION DE HECHO") then
+                "UNIÓN DE HECHO"
+            else
+                v
+    in
+        r,
+
+    // =========================
+    // 1. ORIGEN SQL (Personal + Historia_Personal en un solo query)
+    // =========================
+    Origen = Sql.Database(
+        "10.0.2.27\DataWareHousse,8699",
+        "GestionHumana",
+        [
+            Query = "
+                WITH HistoriaAgg AS (
+                    SELECT
+                        hp.Codigo_Personal,
+                        SUM(
+                            DATEDIFF(
+                                DAY,
+                                CAST(hp.Fecha_Inicio_Evento AS date),
+                                COALESCE(CAST(hp.Fecha_Fin_Evento AS date), CAST(GETDATE() AS date))
+                            )
+                        ) AS [Antigüedad Acumulada],
+                        COUNT(*) AS [N° Ingresos]
+                    FROM dbo.Historia_Personal AS hp
+                    WHERE
+                        UPPER(
+                            LTRIM(
+                                RTRIM(
+                                    REPLACE(
+                                        REPLACE(ISNULL(hp.Tipo_de_Evento, ''), CHAR(13), ''),
+                                        CHAR(10), ''
+                                    )
+                                )
+                            )
+                        ) = 'IS'
+                    GROUP BY hp.Codigo_Personal
+                    HAVING SUM(
+                        DATEDIFF(
+                            DAY,
+                            CAST(hp.Fecha_Inicio_Evento AS date),
+                            COALESCE(CAST(hp.Fecha_Fin_Evento AS date), CAST(GETDATE() AS date))
+                        )
+                    ) IS NOT NULL
+                )
+                SELECT
+                    UPPER(LTRIM(RTRIM(p.Codigo_Personal)))      AS [Código Personal],
+                    UPPER(LTRIM(RTRIM(p.Cargo_Actual)))         AS [Cargo Actual],
+                    UPPER(LTRIM(RTRIM(p.Area_Original)))        AS [Área Original],
+                    UPPER(LTRIM(RTRIM(p.Direccion)))            AS [Dirección],
+                    UPPER(LTRIM(RTRIM(p.Ciudad)))               AS [Ciudad],
+                    UPPER(LTRIM(RTRIM(p.Parroquia)))            AS [Parroquia],
+                    UPPER(LTRIM(RTRIM(p.Nombre_Completo)))      AS [Nombre Completo],
+                    UPPER(LTRIM(RTRIM(p.Estado_Civil)))         AS [Estado Civil],
+                    CAST(p.Fecha_de_Nacimiento AS date)         AS [Fecha Nacimiento],
+
+                    -- LUGAR DE NACIMIENTO SUPER ESTANDARIZADO
+                    CASE 
+                        WHEN p.Lugar_de_Nacimiento IS NULL OR LTRIM(RTRIM(p.Lugar_de_Nacimiento)) = '' THEN NULL
+                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%CUENCA%'          THEN 'CUENCA - AZUAY - ECUADOR'
+                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%PAUTE%'           THEN 'PAUTE - AZUAY - ECUADOR'
+                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%GUALACEO%'        THEN 'GUALACEO - AZUAY - ECUADOR'
+                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%AZOGUES%'         THEN 'AZOGUES - CAÑAR - ECUADOR'
+                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%BIBLIAN%'         THEN 'BIBLIÁN - CAÑAR - ECUADOR'
+                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%CAÑAR%'           THEN 'CAÑAR - CAÑAR - ECUADOR'
+                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%SANTA ISABEL%'    THEN 'SANTA ISABEL - AZUAY - ECUADOR'
+                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%MACHALA%'         THEN 'MACHALA - EL ORO - ECUADOR'
+                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%GUAYAQUIL%'       THEN 'GUAYAQUIL - GUAYAS - ECUADOR'
+                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%QUITO%'           THEN 'QUITO - PICHINCHA - ECUADOR'
+                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%LOJA%'            THEN 'LOJA - LOJA - ECUADOR'
+                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%AMBATO%'          THEN 'AMBATO - TUNGURAHUA - ECUADOR'
+                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%RIOBAMBA%'        THEN 'RIOBAMBA - CHIMBORAZO - ECUADOR'
+                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%IBARRA%'          THEN 'IBARRA - IMBABURA - ECUADOR'
+                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%LATACUNGA%'       THEN 'LATACUNGA - COTOPAXI - ECUADOR'
+                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%ESMERALDAS%'      THEN 'ESMERALDAS - ESMERALDAS - ECUADOR'
+                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%TULCAN%'          THEN 'TULCÁN - CARCHI - ECUADOR'
+                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%ZAMORA%'          THEN 'ZAMORA - ZAMORA CHINCHIPE - ECUADOR'
+                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%PERU%' 
+                          OR UPPER(p.Lugar_de_Nacimiento) LIKE '%PERÚ%'            THEN 'PERÚ'
+                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%VENEZUELA%'       THEN 'VENEZUELA'
+                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%COLOMBIA%'        THEN 'COLOMBIA'
+                        ELSE UPPER(LTRIM(RTRIM(p.Lugar_de_Nacimiento)))
+                    END                                       AS [Lugar Nacimiento],
+
+                    UPPER(LTRIM(RTRIM(p.Sexo)))                 AS [Sexo],
+                    UPPER(LTRIM(RTRIM(p.Cedula_de_Identidad)))  AS [Cédula Identidad],
+                    UPPER(LTRIM(RTRIM(p.Instruccion_Titulo)))   AS [Instrucción Titulo],
+                    UPPER(LTRIM(RTRIM(p.Clasif_Trabajo)))       AS [Clasificación],
+                    UPPER(LTRIM(RTRIM(p.Activo_o_Inactivo)))    AS [Estado],
+                    p.Numero_de_hijos                           AS [N° Hijos],
+                    p.Cargas_familiares                         AS [N° Cargas Familiares],
+                    CAST(p.Ultimo_Ingreso AS date)              AS [Ultimo Ingreso],
+                    CAST(p.Ultima_Salida AS date)               AS [Ultima Salida],
+                    CAST(p.Fecha_1er_Ing_IESS AS date)          AS [Fecha 1° Ingreso IESS],
+                    UPPER(LTRIM(RTRIM(p.A_Empresa)))            AS [Empresa],
+                    UPPER(LTRIM(RTRIM(p.Nacionalidad)))         AS [Nacionalidad],
+                    CASE 
+                        WHEN p.NO_AplicaRendim = '1' THEN 'No'
+                        WHEN p.NO_AplicaRendim IS NULL THEN 'Sí'
+                        ELSE p.NO_AplicaRendim
+                    END                                       AS [Aplica Rendimiento],
+                    CASE 
+                        WHEN p.Ultimo_Ingreso IS NULL THEN NULL
+                        WHEN p.Ultima_Salida IS NULL 
+                             THEN DATEDIFF(DAY, CAST(p.Ultimo_Ingreso AS date), CAST(GETDATE() AS date))
+                        ELSE DATEDIFF(DAY, CAST(p.Ultimo_Ingreso AS date), CAST(p.Ultima_Salida AS date))
+                    END                                       AS [Antigüedad Ultimo Ingreso],
+                    CASE 
+                        WHEN p.Fecha_de_Nacimiento IS NULL THEN NULL 
+                        ELSE DATEDIFF(DAY, CAST(p.Fecha_de_Nacimiento AS date), CAST(GETDATE() AS date))
+                    END                                       AS [Edad_Dias],
+                    h.[Antigüedad Acumulada],
+                    h.[N° Ingresos]
+                FROM dbo.Personal AS p
+                LEFT JOIN HistoriaAgg AS h
+                    ON p.Codigo_Personal = h.Codigo_Personal
+            "
+        ]
+    ),
+
+    // =========================
+    // 2. TIPOS Y CAMPOS DERIVADOS EN M
+    // =========================
+    #"Tipo cambiado base" = Table.TransformColumnTypes(
+        Origen,
+        {
+            {"N° Hijos", Int64.Type},
+            {"N° Cargas Familiares", Int64.Type},
+            {"Ultimo Ingreso", type date},
+            {"Ultima Salida", type date},
+            {"Fecha 1° Ingreso IESS", type date},
+            {"Fecha Nacimiento", type date},
+            {"Antigüedad Ultimo Ingreso", Int64.Type},
+            {"Edad_Dias", Int64.Type},
+            {"Antigüedad Acumulada", Int64.Type},
+            {"N° Ingresos", Int64.Type}
+        }
+    ),
+
+    // Edad en años a partir de los días
+    #"Edad años agregada" = Table.AddColumn(
+        #"Tipo cambiado base", 
+        "Edad [Años]", 
+        each if [Edad_Dias] = null 
+             then null 
+             else Number.RoundDown(Number.From([Edad_Dias]) / 365.25),
+        Int64.Type
+    ),
+
+    // Renombrar Edad_Dias -> Edad [Días]
+    #"Edad renombrada" = Table.RenameColumns(
+        #"Edad años agregada",
+        {{"Edad_Dias", "Edad [Días]"}}
+    ),
+
+    // =========================
+    // 3. INSTRUCCIÓN: texto limpio + nivel + área
+    // =========================
+    #"Instrucción normalizada" = Table.TransformColumns(
+        #"Edad renombrada",
+        {{"Instrucción Titulo", fnNormTituloTexto, type text}}
+    ),
+
+    #"Nivel instrucción agregada" = Table.AddColumn(
+        #"Instrucción normalizada",
+        "Nivel Instrucción",
+        each fnNivelTitulo([Instrucción Titulo]),
+        type text
+    ),
+
+    #"Área instrucción agregada" = Table.AddColumn(
+        #"Nivel instrucción agregada",
+        "Área Instrucción",
+        each fnAreaTitulo([Instrucción Titulo]),
+        type text
+    ),
+
+    // =========================
+    // 4. ESTANDARIZACIÓN RESTO DE ETIQUETAS (M)
+    // =========================
+    #"Campos estandarizados" = Table.TransformColumns(
+        #"Área instrucción agregada",
+        {
+            {"Cargo Actual", fnNormCargo, type text},
+            {"Parroquia", fnNormParroquia, type text},
+            {"Nacionalidad", fnNormNacionalidad, type text},
+            {"Estado Civil", fnNormEstadoCivil, type text}
+        }
+    ),
+
+    // =========================
+    // 5. ORDEN FINAL DE COLUMNAS (JERARQUÍA)
+    // =========================
+    #"Columnas reordenadas" = Table.ReorderColumns(
+        #"Campos estandarizados",
+        {
+            // Identificación básica
+            "Cédula Identidad",
+            "Código Personal",
+            "Nombre Completo",
+
+            // Demográficos
+            "Sexo",
+            "Estado Civil",
+            "Nacionalidad",
+            "N° Hijos",
+            "N° Cargas Familiares",
+
+            // Nacimiento
+            "Fecha Nacimiento",
+            "Edad [Años]",
+            "Edad [Días]",
+            "Lugar Nacimiento",
+
+            // Instrucción / formación
+            "Instrucción Titulo",
+            "Nivel Instrucción",
+            "Área Instrucción",
+
+            // Ubicación actual
+            "Dirección",
+            "Parroquia",
+            "Ciudad",
+
+            // Laboral
+            "Empresa",
+            "Área Original",
+            "Cargo Actual",
+            "Clasificación",
+            "Estado",
+            "Ultimo Ingreso",
+            "Ultima Salida",
+            "Fecha 1° Ingreso IESS",
+            "Antigüedad Ultimo Ingreso",
+            "Antigüedad Acumulada",
+            "N° Ingresos",
+            "Aplica Rendimiento"
+        }
+    )
+in
+    #"Columnas reordenadas"
