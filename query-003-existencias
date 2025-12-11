@@ -1,162 +1,561 @@
 let
-    Origen =
-        Sql.Database(
-            "10.0.2.27\DataWareHousse,8699",
-            "GestionHumana",
-            [
-                Query = "
-                    SET NOCOUNT ON;
+    // =========================
+    // 0. FUNCIONES AUXILIARES (M)
+    // =========================
+    fnNormText = (t as nullable text) as nullable text =>
+        if t = null then 
+            null 
+        else 
+            Text.Upper(
+                Text.Trim(
+                    Text.Clean(t)
+                )
+            ),
 
-                    DECLARE @FechaInicio date = '2020-09-01';
-                    DECLARE @FechaFin    date = CAST(GETDATE() AS date);
+    fnContainsAny = (txt as nullable text, patterns as list) as logical =>
+        if txt = null then 
+            false 
+        else
+            List.AnyTrue(
+                List.Transform(
+                    patterns,
+                    each Text.Contains(txt, _)
+                )
+            ),
 
-                    /* ======================================
-                       1) BASE ENTRADAS-SALIDAS DESDE HISTORIA_PERSONAL
-                          + MAESTRO + PERSONAL (Finca MH/SJ)
-                       ====================================== */
-                    WITH BaseMov AS (
-                        SELECT
-                            hp.Codigo_Personal,
-                            CAST(hp.Fecha_Inicio_Evento AS date) AS Fecha_Ingreso,
-                            CAST(hp.Fecha_Fin_Evento    AS date) AS Fecha_Salida
-                        FROM dbo.Historia_Personal AS hp
-                        INNER JOIN dbo.GHU_View_Maestro_Empleados AS me
-                            ON hp.Codigo_Personal = me.Codigo_Personal
-                        INNER JOIN dbo.Personal AS p
-                            ON hp.Codigo_Personal = p.Codigo_Personal
-                        WHERE
-                            hp.Tipo_de_Evento = 'IS'                  -- Ingreso/Salida
-                            AND hp.Fecha_Inicio_Evento IS NOT NULL
-                            AND CAST(hp.Fecha_Inicio_Evento AS date) >= @FechaInicio
-                            AND CAST(hp.Fecha_Inicio_Evento AS date) <= @FechaFin
-                            AND me.Codigo_Personal NOT LIKE 'VC%'     -- excluye VC
-                            AND me.Clasificacion_Personal IN ('AGR','OCAS','ADM')  -- AGR, ADM, OCAS
-                            AND p.Finca IN ('MH', 'SJ')                -- solo fincas MH y SJ
-                            AND p.A_Empresa = '2 - STARFLOWERS CIA. LTDA.'
+    // ---- Cargo Actual: corregir tildes / género / puntuación ----
+    fnNormCargo = (t as nullable text) as nullable text =>
+    let
+        v0 = fnNormText(t),
+        v1 = if v0 = null then null else Text.Replace(v0, ".", ""),   // quitar puntos
+        r =
+            if v1 = null or v1 = "" then
+                null
+            // COORDINADOR / COORDINADORA
+            else if List.Contains({"COORDINADOR", "COORDINADORA"}, v1) then
+                "COORDINADOR"
+            // SUPERVISOR / SUPERVISORA
+            else if List.Contains({"SUPERVISOR", "SUPERVISORA"}, v1) then
+                "SUPERVISOR"
+            // JEFE DE AREA
+            else if v1 = "JEFE DE AREA" then
+                "JEFE DE ÁREA"
+            // TRABAJADOR FLORÍCOLA
+            else if v1 = "TRABAJADOR FLORÍCOLA O DEL AGRO" 
+                 or v1 = "TRABAJADOR OPERATIVO FLORICOLA O DEL AGRO"
+                 or v1 = "TRABAJADOR OPERATIVO FLORÍCOLA O DEL AGRO" then
+                "TRABAJADOR OPERATIVO FLORÍCOLA O DEL AGRO"
+            // TRABAJADORA SOCIAL -> neutral
+            else if v1 = "TRABAJADORA SOCIAL" then
+                "TRABAJADOR SOCIAL"
+            // VENDEDORA SENIOR -> neutral
+            else if v1 = "VENDEDORA SENIOR" then
+                "VENDEDOR SENIOR"
+            else
+                v1
+    in
+        r,
+
+    // ---- Parroquia: correcciones básicas y unificación de duplicados evidentes ----
+    fnNormParroquia = (t as nullable text) as nullable text =>
+    let
+        v0 = fnNormText(t),
+        v1 = if v0 = null then null else Text.Replace(v0, "  ", " "), // colapsar dobles espacios
+        r =
+            if v1 = null or v1 = "" then
+                null
+            else if List.Contains({"EL BATAN", "BATAN"}, v1) then
+                "EL BATÁN"
+            else if List.Contains({"EL CABO", "CABO"}, v1) then
+                "EL CABO"
+            else if List.Contains({"AZGOUES", "AZOGUES"}, v1) then
+                "AZOGUES"
+            else if List.Contains({"GUALACEO", "GUALACAEO", "GUALCEO"}, v1) then
+                "GUALACEO"
+            else if List.Contains({"DUG DUG", "DUG- DUG", "DUGDUG"}, v1) then
+                "DUG DUG"
+            else if List.Contains({"HUAYNA CAPAC", "HUAYNA CÁPAC", "HUAYNACAPAC"}, v1) then
+                "HUAYNA CÁPAC"
+            else if v1 = "EL  CEBOLLAR" then
+                "EL CEBOLLAR"
+            else
+                v1
+    in
+        r,
+
+    // =========================
+    //  Instrucción: texto súper limpio + Nivel + Área
+    // =========================
+
+    // --- Normalización fuerte del texto del título ---
+    fnNormTituloTexto = (t as nullable text) as nullable text =>
+    let
+        v0 = fnNormText(t),
+        v1 = if v0 = null then null else Text.Replace(v0, "  ", " "),
+        // correcciones de errores de tipeo/faltas frecuentes
+        v2 = 
+            if v1 = null then null
+            else if v1 = "CIENCAS" then "CIENCIAS"
+            else if v1 = "AGRONOMO" or v1 = "AGRONÓMICA" or v1 = "AGRONOMICA" then "AGRONOMÍA"
+            else if v1 = "IGENIERO AGRONOMO" then "INGENIERO AGRÓNOMO"
+            else if v1 = "INGENIERIO INDUSTRIAL" or v1 = "INGENIERO INDUTRAIL" or v1 = "INGENIERO INDUTRIAL" then "INGENIERO INDUSTRIAL"
+            else if v1 = "ING.EN CIENCIAS DE LA COMPUTACION" then "INGENIERO EN CIENCIAS DE LA COMPUTACION"
+            else if v1 = "TECNICO AGROPECUAR" or v1 = "TECNICO AGROPÈCUARIO" then "TECNICO AGROPECUARIO"
+            else if v1 = "CIENCIAS(GENERALES)" then "CIENCIAS GENERALES"
+            else if v1 = "DE SERVCIOS" or v1 = "DE SERVIC" then "DE SERVICIOS"
+            else if v1 = "AREA TECNICA DE SERVCIOS" then "AREA TECNICA DE SERVICIOS"
+            else 
+                v1,
+        // unificar 'TEC.' 'ING.' etc
+        v3 = if v2 = null then null else
+                Text.Replace(
+                    Text.Replace(
+                        Text.Replace(v2, "TEC.", "TECNICO"),
+                        "ING.", "INGENIERO"
                     ),
+                    "LCDA.", "LICENCIADA"
+                ),
+        v4 = if v3 = null then null else 
+                Text.Replace(
+                    Text.Replace(v3, "LCDO.", "LICENCIADO"),
+                    "TÉCNICO", "TECNICO"
+                )
+    in
+        v4,
 
-                    /* ======================================
-                       2) CALENDARIO DÍA A DÍA
-                       ====================================== */
-                    Calendario AS (
-                        SELECT @FechaInicio AS Fecha
-                        UNION ALL
-                        SELECT DATEADD(DAY, 1, Fecha)
-                        FROM Calendario
-                        WHERE Fecha < @FechaFin
-                    ),
+    // --- Nivel de instrucción (para análisis) ---
+    fnNivelTitulo = (t as nullable text) as nullable text =>
+    let
+        v = fnNormTituloTexto(t),
+        r =
+            if v = null or v = "" then
+                null
+            // POSGRADO
+            else if fnContainsAny(v, {"MAGISTER", "MÁGISTER", "MAESTRIA", "MAESTRÍA", "MASTER"}) then
+                "POSGRADO"
+            else if fnContainsAny(v, {"DOCTOR", "PHD", "PH.D"}) then
+                "POSGRADO"
+            // TECNÓLOGO
+            else if fnContainsAny(v, {"TECNOLOGO", "TECNÓLOGO"}) then
+                "TECNÓLOGO"
+            // TÉCNICO
+            else if fnContainsAny(v, {"TECNICO", "TÉCNICO"}) then
+                "TÉCNICO"
+            // BACHILLER
+            else if Text.Contains(v, "BACHILLER") then
+                "BACHILLER"
+            else if Text.Contains(v, "UNIFICADO") or Text.Contains(v, "CIENCIAS GENERALES") then
+                "BACHILLER"
+            // UNIVERSITARIO (pregrado)
+            else if fnContainsAny(v, {"INGENIER", "INGENIERO", "INGENIERA"}) then
+                "UNIVERSITARIO"
+            else if fnContainsAny(v, {"LICENCIAD", "ECONOMIST", "PSICOLOG", "ABOGAD", "ARQUITECT", "MEDIC", "ODONTOLOG"}) then
+                "UNIVERSITARIO"
+            // si dice CIENCIAS pero no tiene tags de técnico/uni/pos, asumimos bachiller
+            else if Text.Contains(v, "CIENCIAS") then
+                "BACHILLER"
+            else
+                "OTRO"
+    in
+        r,
 
-                    /* ======================================
-                       3) KÁRDEX PERSONA-DÍA (CORREGIDO)
-                          - Entradas/Salidas por día
-                          - Existencias del día (personas activas ese día)
-                          - Antigüedad ese día
-                       ====================================== */
-                    KardexPersonaDia AS (
-                        SELECT
-                            c.Fecha,
-                            b.Codigo_Personal,
-                            b.Fecha_Ingreso,
-                            b.Fecha_Salida,
+    // --- Área de instrucción (campo: agro, sistemas, admin, etc.) ---
+    fnAreaTitulo = (t as nullable text) as nullable text =>
+    let
+        v = fnNormTituloTexto(t),
+        r =
+            if v = null or v = "" then
+                null
+            else if fnContainsAny(v, {"AGROPECUAR", "AGROPECUARIA", "AGRICOLA", "AGRONOM", "AGROINDUSTRIA", "ZOO", "AGROECOLOGIA"}) then
+                "AGROPECUARIA / AGRONOMÍA"
+            else if fnContainsAny(v, {"CONTABILID", "AUDITORIA", "FINANZ", "COSTOS", "CARTERA"}) then
+                "CONTABILIDAD / FINANZAS"
+            else if fnContainsAny(v, {"ADMINISTRACION", "ADMINISTRACIÓN", "EMPRES", "NEGOCIO", "NEGOCIACION", "MARKETING", "VENTAS", "COMERCIO", "MERCACEO"}) then
+                "ADMINISTRACIÓN / NEGOCIOS"
+            else if fnContainsAny(v, {"SISTEM", "INFORMATICA", "INFORMÁTICA", "COMPUTAC", "SOFTWARE", "TICS", "TELEMATICA"}) then
+                "SISTEMAS / INFORMÁTICA"
+            else if fnContainsAny(v, {"PSICOLOG", "TRABAJO SOCIAL", "TRABAJADORA SOCIAL", "GESTION Y DESARROLLO COMUNITARIO", "SOCIAL"}) then
+                "CIENCIAS SOCIALES / PSICOLOGÍA"
+            else if fnContainsAny(v, {"EDUCACION", "EDUCACIÓN", "PEDAGOGIA", "DOCENCIA"}) then
+                "EDUCACIÓN"
+            else if fnContainsAny(v, {"MEDIC", "ENFERMERIA", "ENFERMERÍA", "FISIOTERAPIA", "SALUD"}) then
+                "SALUD"
+            else if fnContainsAny(v, {"INDUSTRIAL", "MECANICA", "MECÁNICA", "ELECTRIC", "ELECTROMECANICA", "ELECTROMECÁNICA", "ELECTRONICA", "ELECTRÓNICA", "CIVIL", "ARQUITECT"}) then
+                "INGENIERÍAS / INDUSTRIAL"
+            else if fnContainsAny(v, {"TURISMO", "HOTELERIA", "HOTELERÍA"}) then
+                "TURISMO / SERVICIOS"
+            else
+                "OTRAS ÁREAS"
+    in
+        r,
 
-                            -- Entrada el día exacto de ingreso
-                            CASE 
-                                WHEN c.Fecha = b.Fecha_Ingreso THEN 1 
-                                ELSE 0 
-                            END AS EsEntrada,
+    // =========================
+    // Nacionalidad y Estado Civil
+    // =========================
+    fnNormNacionalidad = (t as nullable text) as nullable text =>
+    let
+        v = fnNormText(t),
+        r =
+            if v = null or v = "" then
+                null
+            else if List.Contains({"ECUATORIANA", "ECUATORIANO", "ECUADOR"}, v) then
+                "ECUATORIANA"
+            else if List.Contains({"PERUANA", "PERUANO"}, v) then
+                "PERUANA"
+            else if v = "VENEZOLANA" then
+                "VENEZOLANA"
+            // cualquier cosa rara (ej. fecha) la mandamos a null
+            else
+                null
+    in
+        r,
 
-                            -- Salida el día exacto de salida
-                            CASE 
-                                WHEN b.Fecha_Salida IS NOT NULL
-                                     AND c.Fecha = b.Fecha_Salida THEN 1
-                                ELSE 0
-                            END AS EsSalida,
+    fnNormEstadoCivil = (t as nullable text) as nullable text =>
+    let
+        v = fnNormText(t),
+        r =
+            if v = null or v = "" then
+                null
+            else if Text.StartsWith(v, "CASAD") then
+                "CASADO"
+            else if Text.StartsWith(v, "SOLTER") then
+                "SOLTERO"
+            else if Text.StartsWith(v, "VIUD") then
+                "VIUDO"
+            else if Text.StartsWith(v, "DIVORCIAD") then
+                "DIVORCIADO"
+            else if Text.StartsWith(v, "UNIÓN DE HECHO") or Text.StartsWith(v, "UNION DE HECHO") then
+                "UNIÓN DE HECHO"
+            else
+                v
+    in
+        r,
 
-                            -- Activo en el día (al cierre del día)
-                            -- Intervalo [Fecha_Ingreso, Fecha_Salida)
-                            CASE 
-                                WHEN c.Fecha >= b.Fecha_Ingreso
-                                     AND (b.Fecha_Salida IS NULL OR c.Fecha < b.Fecha_Salida)
-                                THEN 1 ELSE 0 
-                            END AS Activo_Dia,
+    // =========================
+    // PROVINCIA / REGIÓN DESDE CÉDULA
+    // =========================
+    fnProvinciaDesdeCedula = (ced as nullable text) as nullable text =>
+    let
+        t   = if ced = null then null else Text.Trim(ced),
+        cod = if t = null or t = "" or Text.Length(t) < 2 then null else Text.Start(t, 2),
+        prov =
+            if cod = null then
+                null
+            else if cod = "01" then "AZUAY"
+            else if cod = "02" then "BOLÍVAR"
+            else if cod = "03" then "CAÑAR"
+            else if cod = "04" then "CARCHI"
+            else if cod = "05" then "COTOPAXI"
+            else if cod = "06" then "CHIMBORAZO"
+            else if cod = "07" then "EL ORO"
+            else if cod = "08" then "ESMERALDAS"
+            else if cod = "09" then "GUAYAS"
+            else if cod = "10" then "IMBABURA"
+            else if cod = "11" then "LOJA"
+            else if cod = "12" then "LOS RÍOS"
+            else if cod = "13" then "MANABÍ"
+            else if cod = "14" then "MORONA SANTIAGO"
+            else if cod = "15" then "NAPO"
+            else if cod = "16" then "PASTAZA"
+            else if cod = "17" then "PICHINCHA"
+            else if cod = "18" then "TUNGURAHUA"
+            else if cod = "19" then "ZAMORA CHINCHIPE"
+            else if cod = "20" then "GALÁPAGOS"
+            else if cod = "21" then "SUCUMBÍOS"
+            else if cod = "22" then "ORELLANA"
+            else if cod = "23" then "SANTO DOMINGO DE LOS TSÁCHILAS"
+            else if cod = "24" then "SANTA ELENA"
+            else if cod = "30" then "ECUATORIANOS RESIDENTES EN EL EXTERIOR"
+            else null
+    in
+        prov,
 
-                            -- Días de antigüedad en ese día
-                            CASE 
-                                WHEN c.Fecha >= b.Fecha_Ingreso
-                                     AND (b.Fecha_Salida IS NULL OR c.Fecha < b.Fecha_Salida)
-                                THEN DATEDIFF(DAY, b.Fecha_Ingreso, c.Fecha)
-                                ELSE NULL
-                            END AS Dias_Antiguedad
-                        FROM Calendario c
-                        JOIN BaseMov b
-                          ON c.Fecha >= b.Fecha_Ingreso
-                         AND c.Fecha <= ISNULL(b.Fecha_Salida, @FechaFin)
-                    ),
+    fnRegionDesdeProvincia = (prov as nullable text) as nullable text =>
+    let
+        p = fnNormText(prov),
+        r =
+            if p = null or p = "" then
+                null
+            else if List.Contains(
+                    {
+                        "AZUAY","BOLÍVAR","CAÑAR","CARCHI","COTOPAXI",
+                        "CHIMBORAZO","IMBABURA","LOJA","PICHINCHA","TUNGURAHUA"
+                    },
+                    p
+                 ) then
+                "SIERRA"
+            else if List.Contains(
+                    {
+                        "EL ORO","ESMERALDAS","GUAYAS","LOS RÍOS","MANABÍ",
+                        "SANTO DOMINGO DE LOS TSÁCHILAS","SANTA ELENA"
+                    },
+                    p
+                 ) then
+                "COSTA"
+            else if List.Contains(
+                    {
+                        "MORONA SANTIAGO","NAPO","PASTAZA",
+                        "ZAMORA CHINCHIPE","SUCUMBÍOS","ORELLANA"
+                    },
+                    p
+                 ) then
+                "AMAZONÍA"
+            else if p = "GALÁPAGOS" then
+                "INSULAR"
+            else if p = "ECUATORIANOS RESIDENTES EN EL EXTERIOR" then
+                "EXTERIOR"
+            else
+                null
+    in
+        r,
 
-                    /* ======================================
-                       4) RESUMEN DIARIO POR ANTIGÜEDAD
-                          (EXISTENCIAS T = T-1 + ENTRADAS T - SALIDAS T)
-                       ====================================== */
-                    ResumenExistencias AS (
-                        SELECT
-                            Fecha,
-                            SUM(EsEntrada) AS Entradas,
-                            SUM(EsSalida)  AS Salidas,
-
-                            -- Existencias del día (personas activas ese día)
-                            SUM(Activo_Dia) AS Existencias_Total,
-
-                            -- Existencias con > 1 año de antigüedad
-                            SUM(
-                                CASE 
-                                    WHEN Activo_Dia = 1
-                                         AND Dias_Antiguedad > 365 
-                                    THEN 1 ELSE 0 
-                                END
-                            ) AS Existencias_Mas_1_Anio,
-
-                            -- Existencias con <= 1 año de antigüedad
-                            SUM(
-                                CASE 
-                                    WHEN Activo_Dia = 1
-                                         AND Dias_Antiguedad <= 365 
-                                    THEN 1 ELSE 0 
-                                END
-                            ) AS Existencias_Menos_1_Anio
-                        FROM KardexPersonaDia
-                        GROUP BY Fecha
-                    )
-
-                    /* ======================================
-                       5) SALIDA FINAL (CALENDARIO COMPLETO)
-                       ====================================== */
+    // =========================
+    // 1. ORIGEN SQL (Personal + Historia_Personal en un solo query)
+    // =========================
+    Origen = Sql.Database(
+        "10.0.2.27\DataWareHousse,8699",
+        "GestionHumana",
+        [
+            Query = "
+                WITH HistoriaAgg AS (
                     SELECT
-                        c.Fecha,
-                        ISNULL(r.Entradas, 0)                 AS Entradas,
-                        ISNULL(r.Salidas, 0)                  AS Salidas,
-                        ISNULL(r.Existencias_Total, 0)        AS Existencias_Total,
-                        ISNULL(r.Existencias_Mas_1_Anio, 0)   AS Existencias_Mas_1_Anio,
-                        ISNULL(r.Existencias_Menos_1_Anio, 0) AS Existencias_Menos_1_Anio
-                    FROM Calendario c
-                    LEFT JOIN ResumenExistencias r
-                      ON c.Fecha = r.Fecha
-                    ORDER BY c.Fecha
-                    OPTION (MAXRECURSION 32767);
-                "
-            ]
-        ),
+                        hp.Codigo_Personal,
+                        SUM(
+                            DATEDIFF(
+                                DAY,
+                                CAST(hp.Fecha_Inicio_Evento AS date),
+                                COALESCE(CAST(hp.Fecha_Fin_Evento AS date), CAST(GETDATE() AS date))
+                            )
+                        ) AS [Antigüedad Acumulada],
+                        COUNT(*) AS [N° Ingresos]
+                    FROM dbo.Historia_Personal AS hp
+                    WHERE
+                        UPPER(
+                            LTRIM(
+                                RTRIM(
+                                    REPLACE(
+                                        REPLACE(ISNULL(hp.Tipo_de_Evento, ''), CHAR(13), ''),
+                                        CHAR(10), ''
+                                    )
+                                )
+                            )
+                        ) = 'IS'
+                    GROUP BY hp.Codigo_Personal
+                    HAVING SUM(
+                        DATEDIFF(
+                            DAY,
+                            CAST(hp.Fecha_Inicio_Evento AS date),
+                            COALESCE(CAST(hp.Fecha_Fin_Evento AS date), CAST(GETDATE() AS date))
+                        )
+                    ) IS NOT NULL
+                )
+                SELECT
+                    UPPER(LTRIM(RTRIM(p.Codigo_Personal)))      AS [Código Personal],
+                    UPPER(LTRIM(RTRIM(p.Cargo_Actual)))         AS [Cargo Actual],
+                    UPPER(LTRIM(RTRIM(p.Area_Original)))        AS [Área Original],
+                    UPPER(LTRIM(RTRIM(p.Direccion)))            AS [Dirección],
+                    UPPER(LTRIM(RTRIM(p.Ciudad)))               AS [Ciudad],
+                    UPPER(LTRIM(RTRIM(p.Parroquia)))            AS [Parroquia],
+                    UPPER(LTRIM(RTRIM(p.Nombre_Completo)))      AS [Nombre Completo],
+                    UPPER(LTRIM(RTRIM(p.Estado_Civil)))         AS [Estado Civil],
+                    CAST(p.Fecha_de_Nacimiento AS date)         AS [Fecha Nacimiento],
+                    UPPER(LTRIM(RTRIM(p.Discapacitado)))        AS [Discapacitado],
 
-    #"Tipo cambiado" =
-        Table.TransformColumnTypes(
-            Origen,
-            {
-                {"Fecha", type date},
-                {"Entradas", Int64.Type},
-                {"Salidas", Int64.Type},
-                {"Existencias_Total", Int64.Type},
-                {"Existencias_Mas_1_Anio", Int64.Type},
-                {"Existencias_Menos_1_Anio", Int64.Type}
-            }
-        )
+                    -- LUGAR DE NACIMIENTO (SIN ESTANDARIZACIÓN COMPLEJA, SOLO LIMPIO)
+                    UPPER(LTRIM(RTRIM(p.Lugar_de_Nacimiento)))  AS [Lugar Nacimiento],
+
+                    UPPER(LTRIM(RTRIM(p.Sexo)))                 AS [Sexo],
+                    UPPER(LTRIM(RTRIM(p.Cedula_de_Identidad)))  AS [Cédula Identidad],
+                    UPPER(LTRIM(RTRIM(p.Instruccion_Titulo)))   AS [Instrucción Titulo],
+                    UPPER(LTRIM(RTRIM(p.Clasif_Trabajo)))       AS [Clasificación],
+                    UPPER(LTRIM(RTRIM(p.Activo_o_Inactivo)))    AS [Estado],
+                    p.Numero_de_hijos                           AS [N° Hijos],
+                    p.Cargas_familiares                         AS [N° Cargas Familiares],
+                    CAST(p.Ultimo_Ingreso AS date)              AS [Ultimo Ingreso],
+                    CAST(p.Ultima_Salida AS date)               AS [Ultima Salida],
+                    CAST(p.Fecha_1er_Ing_IESS AS date)          AS [Fecha 1° Ingreso IESS],
+                    UPPER(LTRIM(RTRIM(p.A_Empresa)))            AS [Empresa],
+                    UPPER(LTRIM(RTRIM(p.Nacionalidad)))         AS [Nacionalidad],
+                    CASE 
+                        WHEN p.NO_AplicaRendim = '1' THEN 'No'
+                        WHEN p.NO_AplicaRendim IS NULL THEN 'Sí'
+                        ELSE p.NO_AplicaRendim
+                    END                                       AS [Aplica Rendimiento],
+                    CASE 
+                        WHEN p.Ultimo_Ingreso IS NULL THEN NULL
+                        WHEN p.Ultima_Salida IS NULL 
+                             THEN DATEDIFF(DAY, CAST(p.Ultimo_Ingreso AS date), CAST(GETDATE() AS date))
+                        ELSE DATEDIFF(DAY, CAST(p.Ultimo_Ingreso AS date), CAST(p.Ultima_Salida AS date))
+                    END                                       AS [Antigüedad Ultimo Ingreso],
+                    CASE 
+                        WHEN p.Fecha_de_Nacimiento IS NULL THEN NULL 
+                        ELSE DATEDIFF(DAY, CAST(p.Fecha_de_Nacimiento AS date), CAST(GETDATE() AS date))
+                    END                                       AS [Edad_Dias],
+                    h.[Antigüedad Acumulada],
+                    h.[N° Ingresos]
+                FROM dbo.Personal AS p
+                LEFT JOIN HistoriaAgg AS h
+                    ON p.Codigo_Personal = h.Codigo_Personal
+            "
+        ]
+    ),
+
+    // =========================
+    // 2. TIPOS Y CAMPOS DERIVADOS EN M
+    // =========================
+    #"Tipo cambiado base" = Table.TransformColumnTypes(
+        Origen,
+        {
+            {"N° Hijos", Int64.Type},
+            {"N° Cargas Familiares", Int64.Type},
+            {"Ultimo Ingreso", type date},
+            {"Ultima Salida", type date},
+            {"Fecha 1° Ingreso IESS", type date},
+            {"Fecha Nacimiento", type date},
+            {"Antigüedad Ultimo Ingreso", Int64.Type},
+            {"Edad_Dias", Int64.Type},
+            {"Antigüedad Acumulada", Int64.Type},
+            {"N° Ingresos", Int64.Type}
+        }
+    ),
+
+    // Edad en años a partir de los días
+    #"Edad años agregada" = Table.AddColumn(
+        #"Tipo cambiado base", 
+        "Edad [Años]", 
+        each if [Edad_Dias] = null 
+             then null 
+             else Number.RoundDown(Number.From([Edad_Dias]) / 365.25),
+        Int64.Type
+    ),
+
+    // Renombrar Edad_Dias -> Edad [Días]
+    #"Edad renombrada" = Table.RenameColumns(
+        #"Edad años agregada",
+        {{"Edad_Dias", "Edad [Días]"}}
+    ),
+
+    // =========================
+    // 3. INSTRUCCIÓN: texto limpio + nivel + área
+    // =========================
+    #"Instrucción normalizada" = Table.TransformColumns(
+        #"Edad renombrada",
+        {{"Instrucción Titulo", fnNormTituloTexto, type text}}
+    ),
+
+    #"Nivel instrucción agregada" = Table.AddColumn(
+        #"Instrucción normalizada",
+        "Nivel Instrucción",
+        each fnNivelTitulo([Instrucción Titulo]),
+        type text
+    ),
+
+    #"Área instrucción agregada" = Table.AddColumn(
+        #"Nivel instrucción agregada",
+        "Área Instrucción",
+        each fnAreaTitulo([Instrucción Titulo]),
+        type text
+    ),
+
+    // =========================
+    // 4. ESTANDARIZACIÓN RESTO DE ETIQUETAS (M)
+    // =========================
+    #"Campos estandarizados" = Table.TransformColumns(
+        #"Área instrucción agregada",
+        {
+            {"Cargo Actual", fnNormCargo, type text},
+            {"Parroquia", fnNormParroquia, type text},
+            {"Nacionalidad", fnNormNacionalidad, type text},
+            {"Estado Civil", fnNormEstadoCivil, type text}
+        }
+    ),
+
+    // =========================
+    // 5. LUGAR / REGIÓN DE REGISTRO DESDE CÉDULA
+    // =========================
+    #"Lugar registro agregado" = Table.AddColumn(
+        #"Campos estandarizados",
+        "Lugar Registro",
+        each fnProvinciaDesdeCedula([Cédula Identidad]),
+        type text
+    ),
+
+    #"Región registro agregada" = Table.AddColumn(
+        #"Lugar registro agregado",
+        "Región Registro",
+        each fnRegionDesdeProvincia([Lugar Registro]),
+        type text
+    ),
+
+    // =========================
+    // 6. ORDEN FINAL DE COLUMNAS (JERARQUÍA)
+    // =========================
+    #"Columnas reordenadas" = Table.ReorderColumns(
+        #"Región registro agregada",
+        {
+            // Identificación básica
+            "Cédula Identidad",
+            "Código Personal",
+            "Nombre Completo",
+
+            // Demográficos
+            "Sexo",
+            "Estado Civil",
+            "Nacionalidad",
+            "N° Hijos",
+            "N° Cargas Familiares",
+
+            // Nacimiento
+            "Fecha Nacimiento",
+            "Edad [Años]",
+            "Edad [Días]",
+            "Lugar Nacimiento",
+            "Lugar Registro",
+            "Región Registro",
+
+            // Instrucción / formación
+            "Instrucción Titulo",
+            "Nivel Instrucción",
+            "Área Instrucción",
+
+            // Ubicación actual
+            "Dirección",
+            "Parroquia",
+            "Ciudad",
+
+            // Laboral
+            "Empresa",
+            "Área Original",
+            "Cargo Actual",
+            "Clasificación",
+            "Estado",
+            "Ultimo Ingreso",
+            "Ultima Salida",
+            "Fecha 1° Ingreso IESS",
+            "Antigüedad Ultimo Ingreso",
+            "Antigüedad Acumulada",
+            "N° Ingresos",
+            "Aplica Rendimiento",
+            "Discapacitado"
+        }
+    ),
+
+    #"Filas filtradas" = Table.SelectRows(#"Columnas reordenadas", each ([Cédula Identidad] <> null)),
+
+    #"Personalizada agregada" = Table.AddColumn(
+        #"Filas filtradas",
+        "Edad Cat",
+        each 
+            let
+                edad = try Number.From([#"Edad [Años]"]) otherwise null
+            in
+                if edad = null then "SIN DATO"
+                else if edad < 18 then "< 18"
+                else if edad <= 24 then "18 - 24"
+                else if edad <= 34 then "25 - 34"
+                else if edad <= 44 then "35 - 44"
+                else if edad <= 54 then "45 - 54"
+                else "55+"
+    )
 in
-    #"Tipo cambiado"
+    #"Personalizada agregada"
