@@ -232,6 +232,84 @@ let
         r,
 
     // =========================
+    // PROVINCIA / REGIÓN DESDE CÉDULA
+    // =========================
+    fnProvinciaDesdeCedula = (ced as nullable text) as nullable text =>
+    let
+        t   = if ced = null then null else Text.Trim(ced),
+        cod = if t = null or t = "" or Text.Length(t) < 2 then null else Text.Start(t, 2),
+        prov =
+            if cod = null then
+                null
+            else if cod = "01" then "AZUAY"
+            else if cod = "02" then "BOLÍVAR"
+            else if cod = "03" then "CAÑAR"
+            else if cod = "04" then "CARCHI"
+            else if cod = "05" then "COTOPAXI"
+            else if cod = "06" then "CHIMBORAZO"
+            else if cod = "07" then "EL ORO"
+            else if cod = "08" then "ESMERALDAS"
+            else if cod = "09" then "GUAYAS"
+            else if cod = "10" then "IMBABURA"
+            else if cod = "11" then "LOJA"
+            else if cod = "12" then "LOS RÍOS"
+            else if cod = "13" then "MANABÍ"
+            else if cod = "14" then "MORONA SANTIAGO"
+            else if cod = "15" then "NAPO"
+            else if cod = "16" then "PASTAZA"
+            else if cod = "17" then "PICHINCHA"
+            else if cod = "18" then "TUNGURAHUA"
+            else if cod = "19" then "ZAMORA CHINCHIPE"
+            else if cod = "20" then "GALÁPAGOS"
+            else if cod = "21" then "SUCUMBÍOS"
+            else if cod = "22" then "ORELLANA"
+            else if cod = "23" then "SANTO DOMINGO DE LOS TSÁCHILAS"
+            else if cod = "24" then "SANTA ELENA"
+            else if cod = "30" then "ECUATORIANOS RESIDENTES EN EL EXTERIOR"
+            else null
+    in
+        prov,
+
+    fnRegionDesdeProvincia = (prov as nullable text) as nullable text =>
+    let
+        p = fnNormText(prov),
+        r =
+            if p = null or p = "" then
+                null
+            else if List.Contains(
+                    {
+                        "AZUAY","BOLÍVAR","CAÑAR","CARCHI","COTOPAXI",
+                        "CHIMBORAZO","IMBABURA","LOJA","PICHINCHA","TUNGURAHUA"
+                    },
+                    p
+                 ) then
+                "SIERRA"
+            else if List.Contains(
+                    {
+                        "EL ORO","ESMERALDAS","GUAYAS","LOS RÍOS","MANABÍ",
+                        "SANTO DOMINGO DE LOS TSÁCHILAS","SANTA ELENA"
+                    },
+                    p
+                 ) then
+                "COSTA"
+            else if List.Contains(
+                    {
+                        "MORONA SANTIAGO","NAPO","PASTAZA",
+                        "ZAMORA CHINCHIPE","SUCUMBÍOS","ORELLANA"
+                    },
+                    p
+                 ) then
+                "AMAZONÍA"
+            else if p = "GALÁPAGOS" then
+                "INSULAR"
+            else if p = "ECUATORIANOS RESIDENTES EN EL EXTERIOR" then
+                "EXTERIOR"
+            else
+                null
+    in
+        r,
+
+    // =========================
     // 1. ORIGEN SQL (Personal + Historia_Personal en un solo query)
     // =========================
     Origen = Sql.Database(
@@ -281,34 +359,10 @@ let
                     UPPER(LTRIM(RTRIM(p.Nombre_Completo)))      AS [Nombre Completo],
                     UPPER(LTRIM(RTRIM(p.Estado_Civil)))         AS [Estado Civil],
                     CAST(p.Fecha_de_Nacimiento AS date)         AS [Fecha Nacimiento],
+                    UPPER(LTRIM(RTRIM(p.Discapacitado)))        AS [Discapacitado],
 
-                    -- LUGAR DE NACIMIENTO SUPER ESTANDARIZADO
-                    CASE 
-                        WHEN p.Lugar_de_Nacimiento IS NULL OR LTRIM(RTRIM(p.Lugar_de_Nacimiento)) = '' THEN NULL
-                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%CUENCA%'          THEN 'CUENCA - AZUAY - ECUADOR'
-                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%PAUTE%'           THEN 'PAUTE - AZUAY - ECUADOR'
-                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%GUALACEO%'        THEN 'GUALACEO - AZUAY - ECUADOR'
-                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%AZOGUES%'         THEN 'AZOGUES - CAÑAR - ECUADOR'
-                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%BIBLIAN%'         THEN 'BIBLIÁN - CAÑAR - ECUADOR'
-                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%CAÑAR%'           THEN 'CAÑAR - CAÑAR - ECUADOR'
-                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%SANTA ISABEL%'    THEN 'SANTA ISABEL - AZUAY - ECUADOR'
-                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%MACHALA%'         THEN 'MACHALA - EL ORO - ECUADOR'
-                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%GUAYAQUIL%'       THEN 'GUAYAQUIL - GUAYAS - ECUADOR'
-                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%QUITO%'           THEN 'QUITO - PICHINCHA - ECUADOR'
-                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%LOJA%'            THEN 'LOJA - LOJA - ECUADOR'
-                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%AMBATO%'          THEN 'AMBATO - TUNGURAHUA - ECUADOR'
-                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%RIOBAMBA%'        THEN 'RIOBAMBA - CHIMBORAZO - ECUADOR'
-                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%IBARRA%'          THEN 'IBARRA - IMBABURA - ECUADOR'
-                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%LATACUNGA%'       THEN 'LATACUNGA - COTOPAXI - ECUADOR'
-                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%ESMERALDAS%'      THEN 'ESMERALDAS - ESMERALDAS - ECUADOR'
-                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%TULCAN%'          THEN 'TULCÁN - CARCHI - ECUADOR'
-                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%ZAMORA%'          THEN 'ZAMORA - ZAMORA CHINCHIPE - ECUADOR'
-                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%PERU%' 
-                          OR UPPER(p.Lugar_de_Nacimiento) LIKE '%PERÚ%'            THEN 'PERÚ'
-                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%VENEZUELA%'       THEN 'VENEZUELA'
-                        WHEN UPPER(p.Lugar_de_Nacimiento) LIKE '%COLOMBIA%'        THEN 'COLOMBIA'
-                        ELSE UPPER(LTRIM(RTRIM(p.Lugar_de_Nacimiento)))
-                    END                                       AS [Lugar Nacimiento],
+                    -- LUGAR DE NACIMIENTO (SIN ESTANDARIZACIÓN COMPLEJA, SOLO LIMPIO)
+                    UPPER(LTRIM(RTRIM(p.Lugar_de_Nacimiento)))  AS [Lugar Nacimiento],
 
                     UPPER(LTRIM(RTRIM(p.Sexo)))                 AS [Sexo],
                     UPPER(LTRIM(RTRIM(p.Cedula_de_Identidad)))  AS [Cédula Identidad],
@@ -417,10 +471,27 @@ let
     ),
 
     // =========================
-    // 5. ORDEN FINAL DE COLUMNAS (JERARQUÍA)
+    // 5. LUGAR / REGIÓN DE REGISTRO DESDE CÉDULA
+    // =========================
+    #"Lugar registro agregado" = Table.AddColumn(
+        #"Campos estandarizados",
+        "Lugar Registro",
+        each fnProvinciaDesdeCedula([Cédula Identidad]),
+        type text
+    ),
+
+    #"Región registro agregada" = Table.AddColumn(
+        #"Lugar registro agregado",
+        "Región Registro",
+        each fnRegionDesdeProvincia([Lugar Registro]),
+        type text
+    ),
+
+    // =========================
+    // 6. ORDEN FINAL DE COLUMNAS (JERARQUÍA)
     // =========================
     #"Columnas reordenadas" = Table.ReorderColumns(
-        #"Campos estandarizados",
+        #"Región registro agregada",
         {
             // Identificación básica
             "Cédula Identidad",
@@ -439,6 +510,8 @@ let
             "Edad [Años]",
             "Edad [Días]",
             "Lugar Nacimiento",
+            "Lugar Registro",
+            "Región Registro",
 
             // Instrucción / formación
             "Instrucción Titulo",
@@ -462,8 +535,27 @@ let
             "Antigüedad Ultimo Ingreso",
             "Antigüedad Acumulada",
             "N° Ingresos",
-            "Aplica Rendimiento"
+            "Aplica Rendimiento",
+            "Discapacitado"
         }
+    ),
+
+    #"Filas filtradas" = Table.SelectRows(#"Columnas reordenadas", each ([Cédula Identidad] <> null)),
+
+    #"Personalizada agregada" = Table.AddColumn(
+        #"Filas filtradas",
+        "Edad Cat",
+        each 
+            let
+                edad = try Number.From([#"Edad [Años]"]) otherwise null
+            in
+                if edad = null then "SIN DATO"
+                else if edad < 18 then "< 18"
+                else if edad <= 24 then "18 - 24"
+                else if edad <= 34 then "25 - 34"
+                else if edad <= 44 then "35 - 44"
+                else if edad <= 54 then "45 - 54"
+                else "55+"
     )
 in
-    #"Columnas reordenadas"
+    #"Personalizada agregada"
