@@ -1,0 +1,27 @@
+MI VIDA, MEJOR — PLAN DE HABITOS
+
+ARCHIVOS:
+- index.html: aplicacion completa. Puede abrirse directamente en un navegador.
+- manifest.webmanifest, sw.js, iconos: permiten instalar como app y trabajar offline cuando se publica en HTTPS.
+
+OPCION RAPIDA (sin publicacion):
+1. Descarga index.html en tu celular.
+2. Abre el archivo con Safari/Chrome desde Archivos/Descargas.
+3. Los registros se intentan guardar en el navegador. ATENCION: en archivos locales (file://) Safari y algunos visores pueden borrar o aislar el almacenamiento. No se garantiza persistencia.
+4. Haz una copia JSON semanal desde Más > Descargar copia JSON.
+
+OPCION RECOMENDADA (para uso diario, gratis):
+1. Sube el contenido de esta carpeta a un repositorio de GitHub dedicado (privado NO funciona con GitHub Pages gratuito en todos los planes; verifica la visibilidad).
+2. Activa GitHub Pages en Settings > Pages, desplegando desde la rama principal o mediante Actions.
+3. Abre la URL HTTPS estable desde Safari o Chrome.
+4. iPhone: Safari > Compartir > Añadir a pantalla de inicio. Android: Chrome > menu > Instalar app o Añadir a pantalla de inicio.
+5. Tras la primera carga, la app queda disponible offline gracias al service worker, sujeto a politicas del navegador.
+
+PRIVACIDAD:
+No hay servidor, cuentas, analitica ni sincronizacion. Las respuestas se guardan en localStorage del navegador EN ESE dispositivo y origen, sin cifrado. Nunca publiques tus archivos de copia JSON en el repositorio: contienen salud, sexualidad y finanzas personales.
+
+COPIAS DE SEGURIDAD:
+Más > Descargar copia JSON; para cambiar de telefono usa Más > Restaurar copia.
+Si se borra almacenamiento del navegador se pierden registros sin copia. Nunca se almacenan datos de la app en GitHub Pages; solo el codigo HTML/CSS/JS.
+
+IMPORTANTE: el plan no reemplaza consultas medicas o asesoria financiera.
